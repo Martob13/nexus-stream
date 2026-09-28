@@ -1,12 +1,14 @@
+import time
 from pydantic import BaseModel, Field
-from typing import List
 
 class TelemetryPayload(BaseModel):
-    stream_id: str = Field(..., description="Unique identifier for the telemetry stream")
-    samples: List[float] = Field(..., description="Sensor readings / audio signal chunks")
-    rate_hz: int = Field(default=1000, description="Sampling rate in Hertz")
+    stream_id: str = Field(..., min_length=1, max_length=64)
+    timestamp: int = Field(default_factory=lambda: int(time.time()))
+    samples: list[float] = Field(..., min_length=1)
+    rate_hz: int = Field(default=1000, gt=0)
 
-class JobResponse(BaseModel):
+class TelemetryResponse(BaseModel):
     status: str
     stream_id: str
     queued_samples: int
+

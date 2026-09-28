@@ -1,0 +1,49 @@
+name: Nexus CI Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test-rust:
+    name: Rust Core Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Run Cargo Tests & Clippy
+        run: |
+          cd core-rs
+          cargo test --verbose
+          cargo clippy -- -D warnings
+
+  test-go:
+    name: Go Engine & CGO Integration
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust Staticlib & Run Go Tests
+        run: |
+          cd core-rs && cargo build --release && cd ..
+          cd worker && CGO_ENABLED=1 go test -v ./...
+
+  test-python:
+    name: FastAPI Gateway Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install dependencies & pytest
+        run: |
+          cd api
+          pip install -r requirements.txt
+          pytest -v tests/
+
