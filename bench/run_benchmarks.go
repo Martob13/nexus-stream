@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"math"
 	"math/rand"
+	"runtime"
 	"time"
 	"unsafe"
 )
@@ -64,7 +65,8 @@ func main() {
 	frame := encodeFrame(uint64(time.Now().Unix()), samples)
 
 	fmt.Println("===============================================================")
-	fmt.Println("       NEXUS-STREAM BENCHMARK: GO BASELINE vs CGO RUST KERNEL   ")
+	fmt.Println("       NEXUS-STREAM BENCHMARK & SYSTEM ENVIRONMENT REPORT      ")
+	fmt.Printf("   OS: %s | Arch: %s | CPUs: %d | Go: %s\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
 	fmt.Printf("   Frame: %d samples | Iterations: %d | Total: %d samples\n", frameSamples, iterations, totalSamples)
 	fmt.Println("===============================================================")
 
@@ -75,7 +77,7 @@ func main() {
 	elapsedGo := time.Since(startGo)
 	throughputGo := float64(totalSamples) / elapsedGo.Seconds() / 1_000_000
 
-	fmt.Printf("1. Go Pure Baseline     : %.2f MSamples/sec | Latency/frame: %s\n",
+	fmt.Printf("1. Go Baseline Loop      : %.2f MSamples/sec (Latency/frame: %s)\n",
 		throughputGo, elapsedGo/iterations)
 
 	startRust := time.Now()
@@ -85,7 +87,7 @@ func main() {
 	elapsedRust := time.Since(startRust)
 	throughputRust := float64(totalSamples) / elapsedRust.Seconds() / 1_000_000
 
-	fmt.Printf("2. Go -> CGO -> Rust FFI: %.2f MSamples/sec | Latency/frame: %s\n",
+	fmt.Printf("2. Go -> CGO -> Rust FFI : %.2f MSamples/sec (Latency/frame: %s)\n",
 		throughputRust, elapsedRust/iterations)
 
 	startFrame := time.Now()
@@ -93,6 +95,6 @@ func main() {
 		_ = encodeFrame(123456, samples)
 	}
 	elapsedFrame := time.Since(startFrame)
-	fmt.Printf("3. Binary Framing Cost  : %s per frame\n", elapsedFrame/iterations)
+	fmt.Printf("3. Binary Framing Cost   : %s per frame\n", elapsedFrame/iterations)
 	fmt.Println("===============================================================")
 }

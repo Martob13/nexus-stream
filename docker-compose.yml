@@ -3,23 +3,25 @@ services:
     image: redis:7-alpine
     container_name: nexus-redis
     ports:
-      - '6380:6379'
+      - "6380:6379"
 
   nexus-api:
     build:
       context: ./api
     container_name: nexus-api
     ports:
-      - '8085:8000'
+      - "8085:8000"
     environment:
       - REDIS_HOST=nexus-redis
       - REDIS_PORT=6379
+      - NEXUS_AUTH_TOKEN=nexus-secret-key
     depends_on:
       - nexus-redis
 
   nexus-worker:
     build:
-      context: ./worker
+      context: .
+      dockerfile: worker/Dockerfile
     container_name: nexus-worker
     environment:
       - REDIS_HOST=nexus-redis

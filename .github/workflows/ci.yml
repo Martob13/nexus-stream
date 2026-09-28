@@ -8,12 +8,15 @@ on:
 
 jobs:
   test-rust:
-    name: Rust Core Verification
+    name: Rust Computational Core
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Run Cargo Tests & Clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: core-rs
+      - name: Test & Clippy
         run: |
           cd core-rs
           cargo test --verbose
@@ -27,8 +30,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
+          cache-dependency-path: worker/go.sum
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build Rust Staticlib & Run Go Tests
+      - name: Build Staticlib & Run Go Tests
         run: |
           cd core-rs && cargo build --release && cd ..
           cd worker && CGO_ENABLED=1 go test -v ./...
@@ -41,9 +45,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
+          cache: "pip"
       - name: Install dependencies & pytest
         run: |
           cd api
           pip install -r requirements.txt
-          pytest -v tests/
-
+          PYTHONPATH=. pytest -v tests/
