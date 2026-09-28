@@ -38,3 +38,28 @@ __pycache__/
 
 # Rust artifacts
 core-rs/target/
+
+# Python
+__pycache__/
+*.py[cod]
+*.class
+.pytest_cache/
+.venv/
+env/
+
+# Rust
+core-rs/target/
+target/
+*.so
+*.a
+*.dylib
+*.dll
+
+# Go
+bin/
+*.test
+
+# Environment & OS
+.env
+.DS_Store
+*.swp

@@ -1,25 +1,25 @@
 # nexus-stream
 
-High-throughput, asynchronous media and telemetry processing pipeline engineered for deterministic performance, bounded memory footprint, and horizontal scalability.
+High-throughput, asynchronous media and telemetry processing pipeline engineered for deterministic performance, backpressure-controlled concurrency, and multi-runtime isolation.
 
 ```
        [ Client / Webhook Ingestion ]
                       │
               FastAPI Gateway (Python)
-         (Schema validation, auth tokens,
-            async lifespan & dispatching)
+         (Schema validation, Bearer auth,
+            async lifespan & Redis queue)
                       │
               [ Redis Job Queue ]
                       │
                       ▼
             Core Ingestion Worker (Go)
       (Goroutines pool, channel multiplexing,
-       backpressure & CGO orchestration)
+       backpressure drop tracking, clean signal drain)
                       │
-                      ▼ (Zero-Copy Static Link)
+                      ▼ (CGO Static Link)
          High-Performance Kernel (Rust)
-       (Binary framing 0xAA55, unrolled SIMD,
-       deterministic telemetry parsing)
+       (0xAA55 binary frame decoding, 4-way unrolled
+        vector math, zero allocations in parser)
                       │
                       ▼
          [ Normalized Stream Output ]
@@ -27,22 +27,23 @@ High-throughput, asynchronous media and telemetry processing pipeline engineered
 
 ## Architecture Overview
 
-\`nexus-stream\` bridges the rapid asynchronous ingress of Python with the memory safety, concurrency models, and raw throughput of compiled systems languages:
+\`nexus-stream\` combines the rapid asynchronous ingress of Python with the concurrency and low-level processing capabilities of Go and Rust:
 
-- **Ingestion Layer (Python / FastAPI):** Handles authenticated ingress, token validation (\`Bearer\`), and non-blocking task dispatching using modern async lifespan context into Redis.
-- **Processing Engine (Go):** Manages worker pools, channel multiplexing, bounded buffer backpressure, and clean OS signal draining (\`SIGINT\`/\`SIGTERM\`) via \`sync.WaitGroup\`.
-- **Compute Kernel (Rust):** High-speed computational module statically linked via CGO (\`libcore_parser.a\`). Parses binary frames with zero heap allocations during runtime loops and computes energy metrics with 4-way unrolled vector operations (SIMD-friendly).
+- **Ingestion Layer (Python / FastAPI):** Strict payload validation via Pydantic (\`1 <= samples <= 65535\`), mandatory Bearer token authentication, and non-blocking asynchronous queueing with \`redis.asyncio\` using modern lifespan management.
+- **Worker Engine (Go):** Multi-threaded worker pool consuming from Redis with bounded channels, backpressure drop metrics via \`sync/atomic\`, and race-free graceful termination handling (\`SIGINT\`/\`SIGTERM\`).
+- **Computational Kernel (Rust):** Statically linked into Go via CGO (\`libcore_parser.a\`). Decodes binary telemetry frames (\`0xAA55\` magic bytes) and calculates RMS and peak signal metrics using 4-way loop unrolling designed for LLVM auto-vectorization with zero heap allocations during parsing.
 
-## Performance & Benchmark Metrics
+## Performance Benchmark
 
-Evaluated locally using reproducible synthetic telemetry datasets (\`make bench\`):
+Measured locally via \`make bench\` executing 500 iterations over 16,384-sample frames (8,192,000 samples evaluated):
 
-| Metric | Go Baseline / Dynamic Memory | CGO + Rust Static Link (nexus-stream) | Observed Result |
+| Pipeline Stage | Implementation | Throughput | Frame Latency |
 | :--- | :--- | :--- | :--- |
-| **Computational Throughput** | ~1,200 MSamples/sec | **1,564.45 MSamples/sec** | High-throughput saturation |
-| **Binary Framing Overhead** | N/A | **50.75 µs** | per 32,768-sample frame |
-| **Test Suite Latency** | Sequential script runs | **< 0.3s Total** | Unit tests in Rust, Go & Python |
-| **Allocation Strategy** | Dynamic Heap Allocations | **Deterministic Stack / Zero-Copy** | Zero runtime memory leaks |
+| **Pure Go Baseline** | Unrolled Go loop | ~1,500+ MSamples/s | ~10 µs / frame |
+| **Go -> CGO -> Rust** | Static C ABI + Rust unrolled | ~800 - 1,200 MSamples/s | ~15 µs / frame |
+| **Binary Framing** | Little-endian buffer serialization | N/A | ~20 - 30 µs / frame |
+
+> *Note: CGO introduces a well-documented call boundary overhead (~50-100ns per invocation). In production high-throughput systems, frames are batched into multi-kilobyte buffers to amortize the boundary transition.*
 
 ## Project Structure
 
@@ -50,24 +51,24 @@ Evaluated locally using reproducible synthetic telemetry datasets (\`make bench\
 nexus-stream/
 ├── api/                  # Python FastAPI Ingestion Service
 │   ├── app/
-│   │   ├── main.py       # Async lifespan gateway & auth routing
-│   │   └── schemas.py    # Pydantic contract definitions
-│   ├── tests/            # Pytest asynchronous integration suite
+│   │   ├── main.py       # Async lifespan gateway & mandatory Bearer auth
+│   │   └── schemas.py    # Pydantic schema with protocol limits (max 65535)
+│   ├── tests/            # Asynchronous test suite (pytest-asyncio)
 │   ├── Dockerfile
 │   └── requirements.txt
 ├── worker/               # Go High-Concurrency Engine
 │   ├── cmd/
-│   │   ├── main.go       # CGO bindings, worker pool & graceful drain
-│   │   └── main_test.go  # Unit & FFI integration tests
+│   │   ├── main.go       # Worker pool, atomic backpressure & clean drain
+│   │   └── main_test.go  # CGO Rust integration tests
 │   ├── go.mod
 │   ├── go.sum
 │   └── Dockerfile
 ├── core-rs/              # Rust Native Kernel / Computational Core
 │   ├── include/          # Exported C ABI header (core_parser.h)
-│   ├── src/lib.rs        # Unrolled SIMD math & binary frame decoder
+│   ├── src/lib.rs        # Binary frame decoder & vector math
 │   └── Cargo.toml        # Staticlib compilation manifest
-├── bench/                # Reproducible benchmark suite
-│   └── run_benchmarks.go # Signal processing throughput evaluator
+├── bench/                # Reproducible micro-benchmark suite
+│   └── run_benchmarks.go # Go baseline vs CGO Rust comparator
 ├── .github/workflows/    # CI/CD automation pipeline (GitHub Actions)
 ├── docker-compose.yml    # Isolated container orchestrator
 ├── Makefile              # Automation targets (run, test, bench, down)
@@ -79,37 +80,17 @@ nexus-stream/
 
 ### Prerequisites
 - Docker Engine & Docker Compose
-- Go 1.22+ and Rust (Cargo) for local verification
-- Make
+- Go 1.22+ and Rust (Cargo)
+- Python 3.11+ with virtualenv
 
-### Running via Docker Compose
-
-```bash
-# Clone the repository
-git clone https://github.com/Martob13/nexus-stream.git
-cd nexus-stream
-
-# Build and launch all isolated services
-make run
-```
-
-### Health Check & Ingestion Test
+### Automated Verification
 
 ```bash
-# Verify API gateway status (isolated port 8085)
-curl -s http://localhost:8085/health
-
-# Dispatch a test telemetry ingestion payload
-curl -X POST http://localhost:8085/v1/telemetry   -H "Content-Type: application/json"   -d '{"stream_id": "sensor-alpha", "samples": [0.15, -0.42, 0.88, 1.25, -0.05], "rate_hz": 1000}'
-```
-
-### Verification & Automated Tests
-
-```bash
-make test         # Runs full test suite: cargo test, CGO go test, and pytest
-make bench        # Executes throughput benchmark (16M samples evaluation)
-docker logs nexus-worker  # Inspect Go worker pool processing latency
-make down         # Gracefully terminate containers
+make test         # Runs test suite across Rust, Go (CGO), and Python
+make bench        # Runs comparative Go vs CGO Rust benchmark
+make run          # Starts isolated containers (ports 8085 and 6380)
+make test-ingest  # Sends sample telemetry payload with Bearer authentication
+make down         # Graceful shutdown
 ```
 
 ## License

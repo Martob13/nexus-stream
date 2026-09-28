@@ -6,7 +6,7 @@ import redis.asyncio as aioredis
 from app.schemas import TelemetryPayload, TelemetryResponse
 
 REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
-REDIS_PORT = int(os.getenv("REDIS_PORT", "6380"))
+REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}"
 AUTH_TOKEN = os.getenv("NEXUS_AUTH_TOKEN", "nexus-secret-key")
 
@@ -40,10 +40,11 @@ async def ingest_telemetry(
     payload: TelemetryPayload,
     authorization: Annotated[str | None, Header()] = None
 ):
-    if authorization and authorization != f"Bearer {AUTH_TOKEN}":
+    # Mandatory Authentication: Missing or incorrect token yields 401
+    if not authorization or authorization != f"Bearer {AUTH_TOKEN}":
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication token"
+            detail="Unauthorized: Valid Bearer token required"
         )
 
     if not redis_client:

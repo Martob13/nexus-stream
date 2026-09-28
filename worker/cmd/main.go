@@ -17,6 +17,7 @@ import (
 "os"
 "os/signal"
 "sync"
+"sync/atomic"
 "syscall"
 "time"
 "unsafe"
@@ -67,21 +68,10 @@ return 0, 0, fmt.Errorf("rust core execution failed with code: %d", int(ret))
 return float64(cMetrics.rms), float64(cMetrics.peak), nil
 }
 
-func telemetryWorker(id int, ctx context.Context, jobs <-chan TelemetryJob, wg *sync.WaitGroup) {
+func telemetryWorker(id int, jobs <-chan TelemetryJob, wg *sync.WaitGroup) {
 defer wg.Done()
-log.Printf("[Worker %d] Attached to CGO Rust engine. Listening...", id)
 
-for {
-select {
-case <-ctx.Done():
-log.Printf("[Worker %d] Shutdown received. Finishing queue...", id)
-return
-case job, ok := <-jobs:
-if !ok {
-log.Printf("[Worker %d] Queue closed, draining completed.", id)
-return
-}
-
+for job := range jobs {
 start := time.Now()
 rawFrame := encodeBinaryFrame(job.Timestamp, job.Samples)
 rms, peak, err := callRustEngine(rawFrame)
@@ -92,10 +82,10 @@ log.Printf("[Worker %d] Stream: %s | ERROR in Rust FFI: %v", id, job.StreamID, e
 continue
 }
 
-log.Printf("[Worker %d] Stream: %s | Rust Processed: %d samples | RMS: %.4f | Peak: %.4f | Latency: %s\n",
+log.Printf("[Worker %d] Stream: %s | Rust Processed: %d samples | RMS: %.4f | Peak: %.4f | Latency: %s",
 id, job.StreamID, len(job.Samples), rms, peak, elapsed)
 }
-}
+log.Printf("[Worker %d] Channel closed and drained. Worker stopped.", id)
 }
 
 func main() {
@@ -118,26 +108,29 @@ signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 const workerCount = 4
 jobsChan := make(chan TelemetryJob, 500)
-var wg sync.WaitGroup
+var workersWg sync.WaitGroup
+var dispatcherWg sync.WaitGroup
+var droppedCount atomic.Uint64
 
 for i := 1; i <= workerCount; i++ {
-wg.Add(1)
-go telemetryWorker(i, ctx, jobsChan, &wg)
+workersWg.Add(1)
+go telemetryWorker(i, jobsChan, &workersWg)
 }
 
-// Dispatcher loop with backpressure control
+dispatcherWg.Add(1)
 go func() {
+defer dispatcherWg.Done()
 for {
 select {
 case <-ctx.Done():
 return
 default:
-result, err := rdb.BRPop(ctx, 1*time.Second, "nexus:stream:jobs").Result()
+result, err := rdb.BRPop(ctx, 500*time.Millisecond, "nexus:stream:jobs").Result()
 if err != nil {
 if err == redis.Nil || ctx.Err() != nil {
 continue
 }
-time.Sleep(300 * time.Millisecond)
+time.Sleep(200 * time.Millisecond)
 continue
 }
 
@@ -149,8 +142,9 @@ continue
 
 select {
 case jobsChan <- job:
-case <-time.After(150 * time.Millisecond):
-log.Printf("BACKPRESSURE ALERT: Dropping stream %s to protect memory boundaries", job.StreamID)
+case <-time.After(100 * time.Millisecond):
+droppedCount.Add(1)
+log.Printf("BACKPRESSURE ALERT: Dropping stream %s | Total dropped: %d", job.StreamID, droppedCount.Load())
 case <-ctx.Done():
 return
 }
@@ -158,12 +152,14 @@ return
 }
 }()
 
-log.Printf("Nexus Core Running. Dispatcher + %d workers linked with Rust SIMD engine. Awaiting signals...", workerCount)
+log.Printf("Nexus Core Running. Dispatcher + %d workers linked with Rust SIMD engine.", workerCount)
 sig := <-sigChan
-log.Printf("Signal %v caught. Initiating graceful shutdown...", sig)
+log.Printf("Signal %v caught. Initiating clean drain sequence...", sig)
 
 cancel()
+dispatcherWg.Wait()
 close(jobsChan)
-wg.Wait()
-log.Println("All workers safely drained. Zero leak exit.")
+workersWg.Wait()
+
+log.Printf("All workers cleanly terminated. Total frames dropped by backpressure: %d. Exiting.", droppedCount.Load())
 }
