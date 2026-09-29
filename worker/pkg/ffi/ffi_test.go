@@ -1,9 +1,9 @@
 package ffi
 
 import (
+	"github.com/Martob13/nexus-stream/worker/pkg/frame"
 	"math"
 	"testing"
-	"github.com/Martob13/nexus-stream/worker/pkg/frame"
 )
 
 func TestCallRustEngine_Valid(t *testing.T) {

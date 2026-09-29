@@ -19,8 +19,8 @@ type SignalMetrics struct {
 }
 
 func CallRustEngine(frame []byte) (SignalMetrics, error) {
-	if len(frame) < 12 {
-		return SignalMetrics{}, errors.New("frame buffer smaller than 12-byte header")
+	if len(frame) < 16 {
+		return SignalMetrics{}, errors.New("frame buffer smaller than 16-byte header")
 	}
 
 	var cMetrics C.SignalMetrics

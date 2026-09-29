@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -41,7 +42,6 @@ func telemetryWorker(id int, jobs <-chan TelemetryJob, wg *sync.WaitGroup, proce
 		}
 
 		count := processedCount.Add(1)
-		// Sampled logging: don't bottleneck stdout in hot path
 		if count%1000 == 0 || len(job.Samples) < 10 {
 			slog.Info("Processed telemetry frame",
 				"worker", id,
@@ -68,6 +68,13 @@ func main() {
 		redisPort = "6379"
 	}
 
+	workerCount := 4
+	if envWorkers := os.Getenv("WORKER_COUNT"); envWorkers != "" {
+		if parsed, err := strconv.Atoi(envWorkers); err == nil && parsed > 0 {
+			workerCount = parsed
+		}
+	}
+
 	rdb := redis.NewClient(&redis.Options{
 		Addr: fmt.Sprintf("%s:%s", redisHost, redisPort),
 	})
@@ -76,7 +83,6 @@ func main() {
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	const workerCount = 4
 	jobsChan := make(chan TelemetryJob, 1000)
 	var workersWg sync.WaitGroup
 	var dispatcherWg sync.WaitGroup
@@ -96,15 +102,14 @@ func main() {
 			case <-ctx.Done():
 				return
 			default:
-				result, err := rdb.BRPop(ctx, 500*time.Millisecond, "nexus:stream:jobs").Result()
+				// Bloqueo continuo (0) interrumpible de inmediato por context cancelation.
+				// Elimina el warning de resolución de sub-segundos de go-redis.
+				result, err := rdb.BRPop(ctx, 0, "nexus:stream:jobs").Result()
 				if err != nil {
 					if ctx.Err() != nil {
 						return
 					}
-					if err == redis.Nil {
-						continue
-					}
-					time.Sleep(200 * time.Millisecond)
+					time.Sleep(100 * time.Millisecond)
 					continue
 				}
 
@@ -135,7 +140,6 @@ func main() {
 	close(jobsChan)
 	workersWg.Wait()
 
-	// Explicit clean close of Redis connection
 	if err := rdb.Close(); err != nil {
 		slog.Error("Error closing Redis connection", "err", err)
 	}

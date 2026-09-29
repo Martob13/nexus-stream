@@ -11,11 +11,10 @@ const (
 	MagicByte0         = 0x55
 	MagicByte1         = 0xAA
 	MaxSamplesPerFrame = 65535
-	HeaderSize         = 12
+	HeaderSize         = 16 // 2 magic + 8 timestamp + 2 count + 4 padding
 )
 
-// EncodeBinaryFrame serializes telemetry samples into a deterministic binary format.
-// Layout: [0..2] Magic (0x55, 0xAA) | [2..10] Timestamp LE | [10..12] Count LE | [12..] float64 LE array
+// EncodeBinaryFrame serializa muestras con alineación estricta de 8 bytes para f64.
 func EncodeBinaryFrame(timestamp uint64, samples []float64) ([]byte, error) {
 	n := len(samples)
 	if n == 0 {
