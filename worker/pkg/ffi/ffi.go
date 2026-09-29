@@ -11,6 +11,8 @@ import (
 	"errors"
 	"fmt"
 	"unsafe"
+
+	"github.com/Martob13/nexus-stream/worker/pkg/frame"
 )
 
 type SignalMetrics struct {
@@ -18,14 +20,14 @@ type SignalMetrics struct {
 	Peak float64
 }
 
-func CallRustEngine(frame []byte) (SignalMetrics, error) {
-	if len(frame) < 16 {
-		return SignalMetrics{}, errors.New("frame buffer smaller than 16-byte header")
+func CallRustEngine(rawFrame []byte) (SignalMetrics, error) {
+	if len(rawFrame) < frame.HeaderSize {
+		return SignalMetrics{}, errors.New("frame buffer smaller than header size")
 	}
 
 	var cMetrics C.SignalMetrics
-	rawPtr := (*C.uint8_t)(unsafe.Pointer(&frame[0]))
-	frameLen := C.size_t(len(frame))
+	rawPtr := (*C.uint8_t)(unsafe.Pointer(&rawFrame[0]))
+	frameLen := C.size_t(len(rawFrame))
 
 	ret := C.parse_and_compute_metrics(rawPtr, frameLen, &cMetrics)
 	if ret != 0 {

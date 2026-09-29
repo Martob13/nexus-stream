@@ -11,6 +11,12 @@ import (
 	"github.com/Martob13/nexus-stream/worker/pkg/frame"
 )
 
+// Global sinks to prevent Go compiler dead-code elimination optimizations
+var (
+	SinkRMS  float64
+	SinkPeak float64
+)
+
 func goBaseline(samples []float64) (float64, float64) {
 	var sumSq, peak float64
 	for _, v := range samples {
@@ -26,31 +32,37 @@ func goBaseline(samples []float64) (float64, float64) {
 func runBenchmarkSuite(frameSamples int, iterations int) {
 	totalSamples := frameSamples * iterations
 	samples := make([]float64, frameSamples)
+	r := rand.New(rand.NewSource(42))
 	for i := 0; i < frameSamples; i++ {
-		samples[i] = rand.Float64()*2.0 - 1.0
+		samples[i] = r.Float64()*2.0 - 1.0
 	}
-	rawFrame, _ := frame.EncodeBinaryFrame(uint64(time.Now().Unix()), samples)
+	rawFrame, err := frame.EncodeBinaryFrame(uint64(time.Now().Unix()), samples)
+	if err != nil {
+		panic(err)
+	}
 
 	fmt.Printf("\n--- Benchmark Scenario: Frame Size = %d samples (%d KB) | Total = %d samples ---\n",
 		frameSamples, (frameSamples*8)/1024, totalSamples)
 
-	// 1. Go Baseline
+	// 1. Go Baseline with sink assignment
 	startGo := time.Now()
 	for i := 0; i < iterations; i++ {
-		_, _ = goBaseline(samples)
+		SinkRMS, SinkPeak = goBaseline(samples)
 	}
 	elapsedGo := time.Since(startGo)
 	throughputGo := float64(totalSamples) / elapsedGo.Seconds() / 1_000_000
 	fmt.Printf("1. Pure Go Loop         : %.2f MSamples/sec | Latency/frame: %s\n",
 		throughputGo, elapsedGo/time.Duration(iterations))
 
-	// 2. Shared CGO Rust Kernel
+	// 2. Shared CGO Rust Kernel with sink assignment
 	startRust := time.Now()
 	for i := 0; i < iterations; i++ {
 		metrics, err := ffi.CallRustEngine(rawFrame)
-		if err != nil || metrics.Peak == 0 {
+		if err != nil {
 			panic("Rust execution failed")
 		}
+		SinkRMS = metrics.RMS
+		SinkPeak = metrics.Peak
 	}
 	elapsedRust := time.Since(startRust)
 	throughputRust := float64(totalSamples) / elapsedRust.Seconds() / 1_000_000
@@ -69,7 +81,7 @@ func runBenchmarkSuite(frameSamples int, iterations int) {
 func main() {
 	fmt.Println("===============================================================")
 	fmt.Println("       NEXUS-STREAM BENCHMARK & SYSTEM ENVIRONMENT REPORT      ")
-	fmt.Printf("   OS: %s | Arch: %s | CPUs: %d | Go: %s\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
+	fmt.Printf("  OS: %s | Arch: %s | CPUs: %d | Go: %s\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
 	fmt.Println("===============================================================")
 
 	// Scenario A: Standard telemetry packet (128 samples ≈ 1 KB)

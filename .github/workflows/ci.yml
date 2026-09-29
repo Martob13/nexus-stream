@@ -68,10 +68,10 @@ jobs:
         run: |
           cd api
           pip install -r requirements.txt
-          NEXUS_AUTH_TOKEN=ci-secret-token PYTHONPATH=. pytest -v tests/
+          NEXUS_AUTH_TOKEN=nexus-ci-dummy-token-verification PYTHONPATH=. pytest -v tests/
 
   docker-build:
-    name: Docker Multi-Stage Builds
+    name: Docker Multi-Stage Verification
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

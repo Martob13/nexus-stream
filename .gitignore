@@ -1,38 +1,30 @@
-# Dependencies & Virtual Envs
-.venv/
-env/
-vendor/
+# Environment & Secrets
+.env
+*.local.env
 
-# Python
+# Go artifacts
+bin/
+*.exe
+core
+go.work
+go.work.sum
+
+# Rust target
+core-rs/target/
+**/*.rs.bk
+
+# Python cache & virtual environments
 __pycache__/
 *.py[cod]
+*$py.class
 .pytest_cache/
-*.egg-info/
+.venv/
+venv/
 
-# Go
-bin/
-*.test
-*.out
-coverage.*
+# Audit & temporary files
+*.audit
+final_audit*.txt
 
-# Rust
-core-rs/target/
-target/
-*.so
-*.a
-*.dylib
-*.dll
-
-# Environment & Config
-.env
-*.local
-
-# Audits & Temporary Bundles
-*audit*.txt
-generate_*.py
-
-# OS / IDE
+# OS artifacts
 .DS_Store
-.idea/
-.vscode/
-*.swp
+Thumbs.db

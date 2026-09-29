@@ -102,8 +102,6 @@ func main() {
 			case <-ctx.Done():
 				return
 			default:
-				// Bloqueo continuo (0) interrumpible de inmediato por context cancelation.
-				// Elimina el warning de resolución de sub-segundos de go-redis.
 				result, err := rdb.BRPop(ctx, 0, "nexus:stream:jobs").Result()
 				if err != nil {
 					if ctx.Err() != nil {
@@ -123,7 +121,9 @@ func main() {
 				case jobsChan <- job:
 				case <-time.After(100 * time.Millisecond):
 					dropped := droppedCount.Add(1)
-					slog.Warn("Backpressure drop event triggered", "stream_id", job.StreamID, "total_dropped", dropped)
+					// Dead Letter Queue (DLQ): preserve dropped jobs for auditing and re-processing
+					_ = rdb.LPush(context.Background(), "nexus:stream:dead", result[1]).Err()
+					slog.Warn("Backpressure drop event triggered -> routed to DLQ", "stream_id", job.StreamID, "total_dropped", dropped)
 				case <-ctx.Done():
 					return
 				}

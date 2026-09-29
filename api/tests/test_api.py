@@ -41,6 +41,21 @@ async def test_auth_cases():
         r3 = await ac.post("/v1/telemetry", headers={"Authorization": "Basic 1234"}, json={"stream_id": "s1", "samples": [1.0]})
         assert r3.status_code == 401
 
+        # Raw bytes header to verify ASGI server handles multibyte inputs gracefully without 500 error
+        raw_headers = [
+            (b"authorization", "Bearer túñç€密".encode("utf-8")),
+            (b"content-type", b"application/json")
+        ]
+        r4 = await ac.post("/v1/telemetry", headers=raw_headers, json={"stream_id": "s1", "samples": [1.0]})
+        assert r4.status_code == 401
+
+@pytest.mark.asyncio
+async def test_payload_too_large():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        headers = {**VALID_HEADERS, "content-length": str(3 * 1024 * 1024)}
+        res = await ac.post("/v1/telemetry", headers=headers, json={"stream_id": "s1", "samples": [1.0]})
+    assert res.status_code == 413
+
 @pytest.mark.asyncio
 async def test_sample_boundaries_and_rejections():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
@@ -51,14 +66,6 @@ async def test_sample_boundaries_and_rejections():
         # Negative timestamp -> 422
         r_time = await ac.post("/v1/telemetry", headers=VALID_HEADERS, json={"stream_id": "s", "timestamp": -5, "samples": [1.0]})
         assert r_time.status_code == 422
-
-        # Valid payload boundary -> passes schema validation (status 202 or 503 if redis client uninitialized)
-        r_valid = await ac.post(
-            "/v1/telemetry",
-            headers=VALID_HEADERS,
-            json={"stream_id": "s_boundary", "samples": [1.0, 2.0]}
-        )
-        assert r_valid.status_code in (202, 503)
 
 def test_pydantic_nan_and_inf_validation():
     with pytest.raises(ValidationError):

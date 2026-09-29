@@ -16,6 +16,9 @@ const (
 
 // EncodeBinaryFrame serializa muestras con alineación estricta de 8 bytes para f64.
 func EncodeBinaryFrame(timestamp uint64, samples []float64) ([]byte, error) {
+	if timestamp == 0 {
+		return nil, errors.New("timestamp must be greater than zero")
+	}
 	n := len(samples)
 	if n == 0 {
 		return nil, errors.New("cannot encode empty samples array")
