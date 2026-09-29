@@ -1,34 +1,20 @@
 package main
 
-/*
-#cgo CFLAGS: -I../../core-rs/include
-#cgo LDFLAGS: ${SRCDIR}/../../core-rs/target/release/libcore_parser.a -lpthread -ldl -lm
-#include "core_parser.h"
-*/
-import "C"
-
 import (
 	"context"
-	"encoding/binary"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"log"
-	"math"
+	"log/slog"
 	"os"
 	"os/signal"
 	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unsafe"
 
+	"github.com/Martob13/nexus-stream/worker/pkg/ffi"
+	"github.com/Martob13/nexus-stream/worker/pkg/frame"
 	"github.com/redis/go-redis/v9"
-)
-
-const (
-	MaxSamplesPerFrame = 65535
-	FrameHeaderSize    = 12
 )
 
 type TelemetryJob struct {
@@ -38,77 +24,41 @@ type TelemetryJob struct {
 	RateHz    int       `json:"rate_hz"`
 }
 
-func encodeBinaryFrame(timestamp uint64, samples []float64) ([]byte, error) {
-	n := len(samples)
-	if n == 0 {
-		return nil, errors.New("cannot encode empty samples")
-	}
-	if n > MaxSamplesPerFrame {
-		return nil, fmt.Errorf("sample count %d exceeds protocol maximum %d", n, MaxSamplesPerFrame)
-	}
-
-	buf := make([]byte, FrameHeaderSize+(n*8))
-	buf[0] = 0x55
-	buf[1] = 0xAA
-	binary.LittleEndian.PutUint64(buf[2:10], timestamp)
-	binary.LittleEndian.PutUint16(buf[10:12], uint16(n))
-
-	for i, s := range samples {
-		if math.IsNaN(s) || math.IsInf(s, 0) {
-			return nil, fmt.Errorf("sample index %d is not a finite number", i)
-		}
-		bits := math.Float64bits(s)
-		offset := FrameHeaderSize + (i * 8)
-		binary.LittleEndian.PutUint64(buf[offset:offset+8], bits)
-	}
-
-	return buf, nil
-}
-
-func callRustEngine(frame []byte) (float64, float64, error) {
-	if len(frame) < FrameHeaderSize {
-		return 0, 0, errors.New("frame buffer smaller than header")
-	}
-
-	var cMetrics C.SignalMetrics
-	rawPtr := (*C.uint8_t)(unsafe.Pointer(&frame[0]))
-	frameLen := C.size_t(len(frame))
-
-	ret := C.parse_and_compute_metrics(rawPtr, frameLen, &cMetrics)
-	if ret != 0 {
-		return 0, 0, fmt.Errorf("rust core execution failed with code: %d", int(ret))
-	}
-
-	return float64(cMetrics.rms), float64(cMetrics.peak), nil
-}
-
 func telemetryWorker(id int, jobs <-chan TelemetryJob, wg *sync.WaitGroup, processedCount *atomic.Uint64) {
 	defer wg.Done()
 
 	for job := range jobs {
-		rawFrame, err := encodeBinaryFrame(job.Timestamp, job.Samples)
+		rawFrame, err := frame.EncodeBinaryFrame(job.Timestamp, job.Samples)
 		if err != nil {
-			log.Printf("[Worker %d] Invalid job rejected (%s): %v", id, job.StreamID, err)
+			slog.Warn("Rejected malformed job payload", "worker", id, "stream_id", job.StreamID, "err", err)
 			continue
 		}
 
-		rms, peak, err := callRustEngine(rawFrame)
+		metrics, err := ffi.CallRustEngine(rawFrame)
 		if err != nil {
-			log.Printf("[Worker %d] Stream: %s | FFI ERROR: %v", id, job.StreamID, err)
+			slog.Error("FFI execution failed", "worker", id, "stream_id", job.StreamID, "err", err)
 			continue
 		}
 
 		count := processedCount.Add(1)
-		// Periodic sampled logging to prevent I/O bottleneck in hot path
-		if count%500 == 0 || len(job.Samples) < 10 {
-			log.Printf("[Worker %d] Stream: %s | Samples: %d | RMS: %.4f | Peak: %.4f (Total: %d)",
-				id, job.StreamID, len(job.Samples), rms, peak, count)
+		// Sampled logging: don't bottleneck stdout in hot path
+		if count%1000 == 0 || len(job.Samples) < 10 {
+			slog.Info("Processed telemetry frame",
+				"worker", id,
+				"stream_id", job.StreamID,
+				"samples", len(job.Samples),
+				"rms", metrics.RMS,
+				"peak", metrics.Peak,
+				"total_processed", count,
+			)
 		}
 	}
-	log.Printf("[Worker %d] Stopped cleanly.", id)
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	slog.SetDefault(logger)
+
 	redisHost := os.Getenv("REDIS_HOST")
 	if redisHost == "" {
 		redisHost = "localhost"
@@ -160,15 +110,15 @@ func main() {
 
 				var job TelemetryJob
 				if err := json.Unmarshal([]byte(result[1]), &job); err != nil {
-					log.Printf("Malformed JSON dropped: %v", err)
+					slog.Warn("Corrupt JSON payload dropped", "err", err)
 					continue
 				}
 
 				select {
 				case jobsChan <- job:
 				case <-time.After(100 * time.Millisecond):
-					droppedCount.Add(1)
-					log.Printf("BACKPRESSURE ALERT: Dropped stream %s | Total: %d", job.StreamID, droppedCount.Load())
+					dropped := droppedCount.Add(1)
+					slog.Warn("Backpressure drop event triggered", "stream_id", job.StreamID, "total_dropped", dropped)
 				case <-ctx.Done():
 					return
 				}
@@ -176,14 +126,19 @@ func main() {
 		}
 	}()
 
-	log.Printf("Nexus Engine online (%d workers). Standard Redis port: %s", workerCount, redisPort)
+	slog.Info("Nexus Worker online", "worker_count", workerCount, "redis_addr", fmt.Sprintf("%s:%s", redisHost, redisPort))
 	sig := <-sigChan
-	log.Printf("Signal %v received. Draining pipeline...", sig)
+	slog.Info("Shutdown signal caught. Draining pipeline...", "signal", sig.String())
 
 	cancel()
 	dispatcherWg.Wait()
 	close(jobsChan)
 	workersWg.Wait()
 
-	log.Printf("Shutdown complete. Processed: %d, Dropped: %d.", processedCount.Load(), droppedCount.Load())
+	// Explicit clean close of Redis connection
+	if err := rdb.Close(); err != nil {
+		slog.Error("Error closing Redis connection", "err", err)
+	}
+
+	slog.Info("All workers safely stopped", "processed", processedCount.Load(), "dropped", droppedCount.Load())
 }

@@ -1,98 +1,51 @@
 # nexus-stream
 
-High-throughput, asynchronous media and telemetry processing pipeline engineered for deterministic performance, backpressure-controlled concurrency, and multi-runtime isolation.
+Pipeline de procesamiento asíncrono de telemetría de alto rendimiento diseñado con aislamiento multi-runtime (FastAPI, pool de workers en Go con CGO y núcleo de cómputo estático en Rust).
 
-```
-       [ Client / Webhook Ingestion ]
-                      │
-              FastAPI Gateway (Python)
-         (Schema validation, Bearer auth,
-            async lifespan & Redis queue)
-                      │
-              [ Redis Job Queue ]
-                      │
-                      ▼
-            Core Ingestion Worker (Go)
-      (Goroutines pool, channel multiplexing,
-       backpressure drop tracking, clean signal drain)
-                      │
-                      ▼ (CGO Static Link)
-         High-Performance Kernel (Rust)
-       (0xAA55 binary frame decoding, 4-way loop
-        unrolling, zero heap allocations in parser)
-                      │
-                      ▼
-         [ Normalized Stream Output ]
-```
 
-## Architecture Overview
 
-\`nexus-stream\` bridges the rapid asynchronous ingress of Python with the concurrency and low-level processing models of Go and Rust:
+## Arquitectura del Sistema
 
-- **Ingestion Layer (Python / FastAPI):** Strict payload validation via Pydantic (\`1 <= samples <= 65535\`, NaN/Inf rejection, positive timestamps), mandatory Bearer token authentication with timing-safe comparison (\`secrets.compare_digest\`), separated \`/health\` (liveness) and \`/ready\` (readiness with Redis ping), and non-blocking asynchronous queueing via \`redis.asyncio\`.
-- **Worker Engine (Go):** Multi-threaded worker pool consuming from Redis with bounded channels, backpressure drop metrics via \`sync/atomic\`, internal defensive protocol validation, and race-free graceful termination handling (\`SIGINT\`/\`SIGTERM\`).
-- **Computational Kernel (Rust):** Statically linked into Go via CGO (\`libcore_parser.a\`). Decodes binary telemetry frames (\`0xAA55\` magic bytes) and calculates RMS and peak signal metrics using 4-way loop unrolling designed for LLVM auto-vectorization with zero heap allocations inside the parsing loop.
+nexus-stream combina la velocidad de desarrollo e ingesta asíncrona de Python con los modelos de concurrencia y procesamiento a bajo nivel de Go y Rust:
 
-## Architectural Trade-offs: CGO Boundary vs. Native Execution
+- **Capa de Ingesta (Python / FastAPI):** Validación estricta con Pydantic (1 <= samples <= 65535, descarte de valores NaN/Inf y marcas de tiempo positivas), autenticación obligatoria mediante token Bearer con comparación constante contra ataques de temporización (secrets.compare_digest), separación de sondas /health (liveness) y /ready (readiness con ping a Redis), y encolado no bloqueante con redis.asyncio.
+- **Motor de Procesamiento (Go):** Pool concurrente de workers consumiendo desde Redis mediante canales con buffer limitado, métricas atómicas de descarte por saturación (sync/atomic), registro estructurado en formato JSON con log/slog, validación defensiva del protocolo (worker/pkg/frame) y apagado limpio sin condiciones de carrera ante señales del sistema operativo (SIGINT/SIGTERM).
+- **Núcleo de Cómputo (Rust):** Enlazado estáticamente en Go vía CGO (libcore_parser.a, sin dependencias externas). Decodifica tramas binarias (0xAA55 little-endian) y calcula métricas RMS y pico mediante desenrollado de bucles en 4 vías orientado a la auto-vectorización por LLVM, garantizando cero reservas dinámicas en heap dentro del bucle de parseo.
 
-Micro-benchmarks (\`make bench\`) demonstrate that executing computations directly in pure Go eliminates the CGO context-switch overhead (~50-100ns per invocation). The hybrid Go + Rust architecture is intentionally designed for:
+## Justificación Técnica: ¿Por qué Rust en un Pipeline de Go?
 
-1. **Shared Computational Kernel:** The Rust kernel compiles to a self-contained static C-ABI library (\`libcore_parser.a\`), enabling identical, deterministic mathematical processing across disparate services (C++, Python FFI, Go, or embedded devices) without duplicating business logic.
-2. **Deterministic Memory Guarantees:** The Rust parser guarantees zero heap allocations during signal ingestion, eliminating garbage collector pauses in the low-level parsing routine.
+Un micro-benchmark elemental muestra que un bucle directo en Go puro suele ser más rápido que cruzar la frontera de CGO debido a la penalización por cambio de contexto del runtime de Go (~50–100ns por llamada).
 
-### Local Benchmark Results (Reference Machine)
+En nexus-stream, Rust se incorpora por garantías arquitectónicas concretas:
+1. **Núcleo Computacional Portable:** El kernel de Rust se compila como biblioteca estática con C-ABI (libcore_parser.a). La misma rutina matemática puede integrarse sin cambios en Python FFI, C++, o microcontroladores embebidos, evitando duplicidad de lógica.
+2. **Determinismo y Frontera Libre de GC:** Mientras Go depende de un recolector de basura rastreador, el parseo en Rust opera sobre buffers prestados sin reservas en memoria dinámica, garantizando tiempos de respuesta deterministas.
+3. **Amortización por Lotes:** En paquetes pequeños el costo de CGO es visible; sin embargo, en flujos masivos donde las muestras se agrupan en tramas de varios kilobytes, el rendimiento del cómputo vectorial supera la sobrecarga de transición.
 
-Evaluated with 500 iterations over 16,384-sample frames (8,192,000 total samples):
+### Evaluación de Rendimiento (make bench)
 
-| Stage | Implementation | Throughput | Latency / Frame |
+Evaluado en entorno Linux amd64 (12 núcleos):
+
+| Escenario de Carga | Go Puro (Línea Base) | Go -> CGO -> Rust FFI | Costo de Framing Binario |
 | :--- | :--- | :--- | :--- |
-| **Go Baseline Loop** | Direct iteration | ~1,518 MSamples/sec | ~10.78 µs |
-| **Go -> CGO -> Rust** | Static C ABI + Unrolled Rust | ~1,035 MSamples/sec | ~15.82 µs |
-| **Binary Framing** | Little-endian serialization | N/A | ~19.83 µs |
+| Paquete Individual (128 muestras ≈ 1 KB) | ~1,169 MSamples/seg | ~761 MSamples/seg (limitado por CGO) | ~324 ns |
+| Trama por Lotes (16,384 muestras ≈ 128 KB) | ~1,369 MSamples/seg | ~1,010 MSamples/seg | ~43.4 µs |
 
-> *Note: Exact metrics depend on CPU architecture and memory cache. Run \`make bench\` to inspect your hardware performance.*
+## Variables de Entorno
 
-## Project Structure
+| Variable | Requerida | Valor por Defecto | Descripción |
+| :--- | :--- | :--- | :--- |
+| NEXUS_AUTH_TOKEN | Sí | Ninguno | Token secreto Bearer para autorizar peticiones HTTP |
+| REDIS_HOST | No | localhost | Dirección del servidor Redis |
+| REDIS_PORT | No | 6379 | Puerto de conexión a Redis |
 
-```
-nexus-stream/
-├── api/                  # Python FastAPI Ingestion Service
-│   ├── app/
-│   │   ├── main.py       # Async lifespan gateway & timing-safe Bearer auth
-│   │   └── schemas.py    # Pydantic schema with protocol limits (max 65535, NaN check)
-│   ├── tests/            # Asynchronous test suite (pytest-asyncio)
-│   ├── Dockerfile
-│   └── requirements.txt
-├── worker/               # Go High-Concurrency Engine
-│   ├── cmd/
-│   │   ├── main.go       # Worker pool, atomic backpressure & clean drain
-│   │   └── main_test.go  # CGO Rust integration tests (happy & edge cases)
-│   ├── go.mod
-│   ├── go.sum
-│   └── Dockerfile        # Multi-stage CGO + Rust build
-├── core-rs/              # Rust Native Kernel / Computational Core
-│   ├── include/          # Exported C ABI header (core_parser.h)
-│   ├── src/lib.rs        # Binary frame decoder & vector math
-│   └── Cargo.toml        # Staticlib compilation manifest
-├── bench/                # Reproducible micro-benchmark suite
-│   └── run_benchmarks.go # Go baseline vs CGO Rust comparator
-├── .github/workflows/    # CI/CD automation pipeline with caching
-├── docker-compose.yml    # Isolated container orchestrator
-├── Makefile              # Automation targets (run, test, bench, down)
-├── .env.example          # Runtime environment template
-└── README.md
-```
+## Estructura del Repositorio
 
-## Quickstart & Verification
 
-```bash
-make test         # Runs full test suite: cargo test, CGO go test, and pytest
-make bench        # Runs comparative Go vs CGO Rust benchmark
-make run          # Starts containerized stack with multi-stage worker build
-make test-ingest  # Sends sample telemetry payload with Bearer authentication
-make down         # Graceful shutdown
-```
 
-## License
+## Verificación y Ejecución
 
-MIT License. See [LICENSE](LICENSE) for details.
+
+
+## Licencia
+
+Distribuido bajo la Licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más detalles.

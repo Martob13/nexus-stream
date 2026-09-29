@@ -11,15 +11,16 @@ RUN cargo build --release
 FROM golang:1.22-alpine AS go-builder
 RUN apk add --no-cache gcc musl-dev
 WORKDIR /build
-# Copy Rust artifacts into matching relative structure
+
 COPY --from=rust-builder /build/core-rs/target/release/libcore_parser.a ./core-rs/target/release/
 COPY --from=rust-builder /build/core-rs/include ./core-rs/include
 
-COPY worker/go.mod worker/go.sum ./worker/
+COPY worker/go.mod worker/go.sum* ./worker/
 WORKDIR /build/worker
 RUN go mod download
 
-COPY worker/cmd ./cmd
+# Copy full worker source (cmd and internal)
+COPY worker/ ./
 RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w -extldflags '-static'" -o /bin/worker ./cmd/main.go
 
 # Stage 3: Minimal runtime container

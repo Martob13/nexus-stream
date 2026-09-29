@@ -10,14 +10,10 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}"
 
-# Strict Auth: fail immediately if not provided
-AUTH_TOKEN = os.getenv("NEXUS_AUTH_TOKEN")
+# Strict Auth Enforcement: Must be provided via environment, zero hardcoded fallback
+AUTH_TOKEN = os.environ.get("NEXUS_AUTH_TOKEN")
 if not AUTH_TOKEN:
-    # Allow fallback ONLY in local testing mode
-    if os.getenv("TESTING") == "1":
-        AUTH_TOKEN = "nexus-secret-key"
-    else:
-        raise RuntimeError("CRITICAL: NEXUS_AUTH_TOKEN environment variable must be set")
+    raise RuntimeError("CRITICAL CONFIGURATION ERROR: NEXUS_AUTH_TOKEN must be set in environment")
 
 redis_client: aioredis.Redis | None = None
 
@@ -68,7 +64,7 @@ async def ingest_telemetry(
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token scheme")
 
-    # Timing-safe constant-time comparison against timing attacks
+    # Timing-safe comparison against timing attacks
     if not secrets.compare_digest(parts[1], AUTH_TOKEN):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 

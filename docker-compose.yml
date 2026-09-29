@@ -3,7 +3,12 @@ services:
     image: redis:7-alpine
     container_name: nexus-redis
     ports:
-      - "6380:6379"
+      - "127.0.0.1:6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 2s
+      retries: 5
 
   nexus-api:
     build:
@@ -14,9 +19,10 @@ services:
     environment:
       - REDIS_HOST=nexus-redis
       - REDIS_PORT=6379
-      - NEXUS_AUTH_TOKEN=nexus-secret-key
+      - NEXUS_AUTH_TOKEN=${NEXUS_AUTH_TOKEN:?Set NEXUS_AUTH_TOKEN in .env}
     depends_on:
-      - nexus-redis
+      nexus-redis:
+        condition: service_healthy
 
   nexus-worker:
     build:
@@ -27,4 +33,5 @@ services:
       - REDIS_HOST=nexus-redis
       - REDIS_PORT=6379
     depends_on:
-      - nexus-redis
+      nexus-redis:
+        condition: service_healthy

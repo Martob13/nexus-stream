@@ -1,20 +1,14 @@
 package main
 
-/*
-#cgo CFLAGS: -I../core-rs/include
-#cgo LDFLAGS: ${SRCDIR}/../core-rs/target/release/libcore_parser.a -lpthread -ldl -lm
-#include "core_parser.h"
-*/
-import "C"
-
 import (
-	"encoding/binary"
 	"fmt"
 	"math"
 	"math/rand"
 	"runtime"
 	"time"
-	"unsafe"
+
+	"github.com/Martob13/nexus-stream/worker/pkg/ffi"
+	"github.com/Martob13/nexus-stream/worker/pkg/frame"
 )
 
 func goBaseline(samples []float64) (float64, float64) {
@@ -29,72 +23,59 @@ func goBaseline(samples []float64) (float64, float64) {
 	return math.Sqrt(sumSq / float64(len(samples))), peak
 }
 
-func rustCGO(frame []byte) (float64, float64, error) {
-	var cMetrics C.SignalMetrics
-	rawPtr := (*C.uint8_t)(unsafe.Pointer(&frame[0]))
-	frameLen := C.size_t(len(frame))
-
-	ret := C.parse_and_compute_metrics(rawPtr, frameLen, &cMetrics)
-	if ret != 0 {
-		return 0, 0, fmt.Errorf("rust core failure: %d", int(ret))
-	}
-	return float64(cMetrics.rms), float64(cMetrics.peak), nil
-}
-
-func encodeFrame(timestamp uint64, samples []float64) []byte {
-	buf := make([]byte, 12+(len(samples)*8))
-	buf[0] = 0x55
-	buf[1] = 0xAA
-	binary.LittleEndian.PutUint64(buf[2:10], timestamp)
-	binary.LittleEndian.PutUint16(buf[10:12], uint16(len(samples)))
-	for i, s := range samples {
-		binary.LittleEndian.PutUint64(buf[12+(i*8):12+(i*8)+8], math.Float64bits(s))
-	}
-	return buf
-}
-
-func main() {
-	const frameSamples = 16384
-	const iterations = 500
+func runBenchmarkSuite(frameSamples int, iterations int) {
 	totalSamples := frameSamples * iterations
-
 	samples := make([]float64, frameSamples)
 	for i := 0; i < frameSamples; i++ {
 		samples[i] = rand.Float64()*2.0 - 1.0
 	}
-	frame := encodeFrame(uint64(time.Now().Unix()), samples)
+	rawFrame, _ := frame.EncodeBinaryFrame(uint64(time.Now().Unix()), samples)
 
-	fmt.Println("===============================================================")
-	fmt.Println("       NEXUS-STREAM BENCHMARK & SYSTEM ENVIRONMENT REPORT      ")
-	fmt.Printf("   OS: %s | Arch: %s | CPUs: %d | Go: %s\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
-	fmt.Printf("   Frame: %d samples | Iterations: %d | Total: %d samples\n", frameSamples, iterations, totalSamples)
-	fmt.Println("===============================================================")
+	fmt.Printf("\n--- Benchmark Scenario: Frame Size = %d samples (%d KB) | Total = %d samples ---\n",
+		frameSamples, (frameSamples*8)/1024, totalSamples)
 
+	// 1. Go Baseline
 	startGo := time.Now()
 	for i := 0; i < iterations; i++ {
 		_, _ = goBaseline(samples)
 	}
 	elapsedGo := time.Since(startGo)
 	throughputGo := float64(totalSamples) / elapsedGo.Seconds() / 1_000_000
+	fmt.Printf("1. Pure Go Loop         : %.2f MSamples/sec | Latency/frame: %s\n",
+		throughputGo, elapsedGo/time.Duration(iterations))
 
-	fmt.Printf("1. Go Baseline Loop      : %.2f MSamples/sec (Latency/frame: %s)\n",
-		throughputGo, elapsedGo/iterations)
-
+	// 2. Shared CGO Rust Kernel
 	startRust := time.Now()
 	for i := 0; i < iterations; i++ {
-		_, _, _ = rustCGO(frame)
+		metrics, err := ffi.CallRustEngine(rawFrame)
+		if err != nil || metrics.Peak == 0 {
+			panic("Rust execution failed")
+		}
 	}
 	elapsedRust := time.Since(startRust)
 	throughputRust := float64(totalSamples) / elapsedRust.Seconds() / 1_000_000
+	fmt.Printf("2. Go -> CGO -> Rust FFI: %.2f MSamples/sec | Latency/frame: %s\n",
+		throughputRust, elapsedRust/time.Duration(iterations))
 
-	fmt.Printf("2. Go -> CGO -> Rust FFI : %.2f MSamples/sec (Latency/frame: %s)\n",
-		throughputRust, elapsedRust/iterations)
-
+	// 3. Framing Cost
 	startFrame := time.Now()
 	for i := 0; i < iterations; i++ {
-		_ = encodeFrame(123456, samples)
+		_, _ = frame.EncodeBinaryFrame(123456, samples)
 	}
 	elapsedFrame := time.Since(startFrame)
-	fmt.Printf("3. Binary Framing Cost   : %s per frame\n", elapsedFrame/iterations)
+	fmt.Printf("3. Binary Framing Cost  : %s per frame\n", elapsedFrame/time.Duration(iterations))
+}
+
+func main() {
+	fmt.Println("===============================================================")
+	fmt.Println("       NEXUS-STREAM BENCHMARK & SYSTEM ENVIRONMENT REPORT      ")
+	fmt.Printf("   OS: %s | Arch: %s | CPUs: %d | Go: %s\n", runtime.GOOS, runtime.GOARCH, runtime.NumCPU(), runtime.Version())
+	fmt.Println("===============================================================")
+
+	// Scenario A: Standard telemetry packet (128 samples ≈ 1 KB)
+	runBenchmarkSuite(128, 50000)
+
+	// Scenario B: High-density batch packet (16,384 samples ≈ 128 KB)
+	runBenchmarkSuite(16384, 500)
 	fmt.Println("===============================================================")
 }

@@ -1,0 +1,8 @@
+.git
+.github
+.venv
+api/.pytest_cache
+*.md
+bench
+.env
+*audit*.txt
