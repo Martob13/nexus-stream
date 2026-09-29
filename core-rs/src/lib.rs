@@ -60,7 +60,7 @@ pub unsafe extern "C" fn parse_and_compute_metrics(
         return 0;
     }
 
-    // Fast-path: 16-byte header guarantees 8-byte alignment (16 % 8 == 0)
+    // Fast-path: the 16-byte header preserves 8-byte alignment when the input frame pointer is already 8-byte aligned.
     let samples: &[f64] =
         slice::from_raw_parts(samples_byte_slice.as_ptr() as *const f64, sample_count);
 
@@ -83,8 +83,7 @@ fn compute_simd_unrolled(samples: &[f64]) -> (f64, f64) {
     let mut peak_2: f64 = 0.0;
     let mut peak_3: f64 = 0.0;
 
-    let chunks = samples.chunks_exact(4);
-    let remainder = chunks.remainder();
+    let (chunks, remainder) = samples.as_chunks::<4>();
 
     for chunk in chunks {
         let v0 = chunk[0];
