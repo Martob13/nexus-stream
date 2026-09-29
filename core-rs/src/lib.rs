@@ -11,13 +11,13 @@ pub struct SignalMetrics {
     pub peak: f64,
 }
 
-/// Decodifica una trama binaria y calcula las métricas RMS y pico.
+/// Decodes a binary telemetry frame and computes RMS and peak signal metrics.
 ///
 /// # Safety
 ///
-/// - `raw_frame_ptr` debe apuntar a un bloque contiguo y legible de `frame_len` bytes.
-/// - `out_metrics` debe ser un puntero válido y alineado hacia una estructura `SignalMetrics` escribible.
-/// - El llamador garantiza que ambos punteros no sean nulos durante la ejecución.
+/// - `raw_frame_ptr` must point to `frame_len` valid, readable bytes.
+/// - `out_metrics` must be a valid, writable `SignalMetrics` pointer.
+/// - The caller must guarantee that neither pointer is NULL.
 #[no_mangle]
 pub unsafe extern "C" fn parse_and_compute_metrics(
     raw_frame_ptr: *const u8,
@@ -52,6 +52,7 @@ pub unsafe extern "C" fn parse_and_compute_metrics(
 
     let samples_byte_slice = &frame[HEADER_SIZE..expected_len];
 
+    // Fallback if pointer alignment is non-8-byte
     if !(samples_byte_slice.as_ptr() as usize).is_multiple_of(std::mem::align_of::<f64>()) {
         let (rms, peak) = compute_unaligned(samples_byte_slice, sample_count);
         (*out_metrics).rms = rms;
@@ -59,10 +60,9 @@ pub unsafe extern "C" fn parse_and_compute_metrics(
         return 0;
     }
 
-    let samples: &[f64] = slice::from_raw_parts(
-        samples_byte_slice.as_ptr() as *const f64,
-        sample_count,
-    );
+    // Fast-path: 16-byte header guarantees 8-byte alignment (16 % 8 == 0)
+    let samples: &[f64] =
+        slice::from_raw_parts(samples_byte_slice.as_ptr() as *const f64, sample_count);
 
     let (rms, peak) = compute_simd_unrolled(samples);
     (*out_metrics).rms = rms;
@@ -102,10 +102,18 @@ fn compute_simd_unrolled(samples: &[f64]) -> (f64, f64) {
         let a2 = v2.abs();
         let a3 = v3.abs();
 
-        if a0 > peak_0 { peak_0 = a0; }
-        if a1 > peak_1 { peak_1 = a1; }
-        if a2 > peak_2 { peak_2 = a2; }
-        if a3 > peak_3 { peak_3 = a3; }
+        if a0 > peak_0 {
+            peak_0 = a0;
+        }
+        if a1 > peak_1 {
+            peak_1 = a1;
+        }
+        if a2 > peak_2 {
+            peak_2 = a2;
+        }
+        if a3 > peak_3 {
+            peak_3 = a3;
+        }
     }
 
     let mut sum_sq = sum_sq_0 + sum_sq_1 + sum_sq_2 + sum_sq_3;
@@ -168,18 +176,69 @@ mod tests {
     }
 
     #[test]
+    fn test_null_pointers() {
+        let frame = [0u8; 16];
+        let mut metrics = SignalMetrics::default();
+        assert_eq!(
+            unsafe { parse_and_compute_metrics(std::ptr::null(), 16, &mut metrics) },
+            -1
+        );
+        assert_eq!(
+            unsafe { parse_and_compute_metrics(frame.as_ptr(), 16, std::ptr::null_mut()) },
+            -1
+        );
+    }
+
+    #[test]
     fn test_invalid_magic_rejection() {
         let frame = [0xFF, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
         let mut metrics = SignalMetrics::default();
-        let res = unsafe { parse_and_compute_metrics(frame.as_ptr(), frame.len(), &mut metrics) };
-        assert_eq!(res, -3);
+        assert_eq!(
+            unsafe { parse_and_compute_metrics(frame.as_ptr(), frame.len(), &mut metrics) },
+            -3
+        );
     }
 
     #[test]
     fn test_short_frame_rejection() {
         let frame = [MAGIC_0, MAGIC_1];
         let mut metrics = SignalMetrics::default();
-        let res = unsafe { parse_and_compute_metrics(frame.as_ptr(), frame.len(), &mut metrics) };
-        assert_eq!(res, -2);
+        assert_eq!(
+            unsafe { parse_and_compute_metrics(frame.as_ptr(), frame.len(), &mut metrics) },
+            -2
+        );
+    }
+
+    #[test]
+    fn test_zero_samples_handling() {
+        let mut frame = [0u8; HEADER_SIZE];
+        frame[0] = MAGIC_0;
+        frame[1] = MAGIC_1;
+        let mut metrics = SignalMetrics {
+            rms: 99.0,
+            peak: 99.0,
+        };
+        assert_eq!(
+            unsafe { parse_and_compute_metrics(frame.as_ptr(), frame.len(), &mut metrics) },
+            0
+        );
+        assert_eq!(metrics.rms, 0.0);
+        assert_eq!(metrics.peak, 0.0);
+    }
+
+    #[test]
+    fn test_boundary_65535_samples() {
+        let sample_count = 65535usize;
+        let mut frame = vec![0u8; HEADER_SIZE + (sample_count * 8)];
+        frame[0] = MAGIC_0;
+        frame[1] = MAGIC_1;
+        frame[10] = (sample_count & 0xFF) as u8;
+        frame[11] = ((sample_count >> 8) & 0xFF) as u8;
+
+        let mut metrics = SignalMetrics::default();
+        assert_eq!(
+            unsafe { parse_and_compute_metrics(frame.as_ptr(), frame.len(), &mut metrics) },
+            0
+        );
     }
 }

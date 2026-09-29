@@ -7,6 +7,26 @@ on:
     branches: [ main ]
 
 jobs:
+  lint-and-format:
+    name: Code Formatting & Quality
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.22"
+      - name: Rust format & Clippy
+        run: |
+          cd core-rs
+          cargo fmt -- --check
+          cargo clippy --all-targets -- -D warnings
+      - name: Go format check
+        run: |
+          test -z "$(gofmt -l worker/ bench/)"
+
   test-rust:
     name: Rust Computational Core
     runs-on: ubuntu-latest
@@ -16,26 +36,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: core-rs
-      - name: Test & Clippy
+      - name: Run Rust Tests
         run: |
           cd core-rs
           cargo test --verbose
-          cargo clippy -- -D warnings
 
   test-go:
-    name: Go Engine & CGO Integration
+    name: Go Engine & Race Detection
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.22"
-          cache-dependency-path: worker/go.sum
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build Staticlib & Run Go Tests
+      - name: Build Staticlib & Run Go Tests with Race Detector
         run: |
           cd core-rs && cargo build --release && cd ..
-          cd worker && CGO_ENABLED=1 go test -v ./...
+          cd worker && CGO_ENABLED=1 go test -race -v ./...
 
   test-python:
     name: FastAPI Gateway Verification
@@ -50,4 +68,14 @@ jobs:
         run: |
           cd api
           pip install -r requirements.txt
-          PYTHONPATH=. pytest -v tests/
+          NEXUS_AUTH_TOKEN=ci-secret-token PYTHONPATH=. pytest -v tests/
+
+  docker-build:
+    name: Docker Multi-Stage Builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build All Docker Compose Services
+        run: |
+          cp .env.example .env
+          docker compose build

@@ -23,6 +23,9 @@ func TestEncodeBinaryFrame_Valid(t *testing.T) {
 	if binary.LittleEndian.Uint16(buf[10:12]) != 2 {
 		t.Errorf("Sample count mismatch")
 	}
+	if len(buf) != HeaderSize+(2*8) {
+		t.Errorf("Expected buffer len %d, got %d", HeaderSize+(2*8), len(buf))
+	}
 }
 
 func TestEncodeBinaryFrame_Boundaries(t *testing.T) {
@@ -40,6 +43,10 @@ func TestEncodeBinaryFrame_Boundaries(t *testing.T) {
 	}
 
 	if _, err := EncodeBinaryFrame(1, []float64{1.0, math.Inf(1)}); err == nil {
-		t.Error("Expected error on Inf")
+		t.Error("Expected error on +Inf")
+	}
+
+	if _, err := EncodeBinaryFrame(1, []float64{1.0, math.Inf(-1)}); err == nil {
+		t.Error("Expected error on -Inf")
 	}
 }

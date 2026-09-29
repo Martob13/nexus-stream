@@ -4,7 +4,7 @@ ifeq ($(NEXUS_AUTH_TOKEN),)
 	NEXUS_AUTH_TOKEN := dev-local-token
 endif
 
-.PHONY: run down build test test-rust test-go test-python bench lint fmt test-ingest
+.PHONY: run down build test test-rust test-go test-python bench lint fmt clean logs test-ingest
 
 build:
 	cd core-rs && cargo build --release
@@ -12,10 +12,11 @@ build:
 
 test-rust:
 	cd core-rs && cargo test --verbose
+	cd core-rs && cargo clippy --all-targets -- -D warnings
 
 test-go:
 	cd core-rs && cargo build --release
-	cd worker && CGO_ENABLED=1 go test -v ./...
+	cd worker && CGO_ENABLED=1 go test -race -v ./...
 
 test-python:
 	cd api && NEXUS_AUTH_TOKEN=$(NEXUS_AUTH_TOKEN) PYTHONPATH=. python -m pytest -v tests/
@@ -27,13 +28,19 @@ bench:
 	go run bench/run_benchmarks.go
 
 lint:
-	cd core-rs && cargo clippy -- -D warnings
-	cd api && python -m ruff check . 2>/dev/null || true
+	cd core-rs && cargo clippy --all-targets -- -D warnings
+	test -z "$$(gofmt -l worker/ bench/)"
 
 fmt:
 	cd core-rs && cargo fmt
-	cd worker && gofmt -w .
-	go run -v fmt ./... 2>/dev/null || true
+	gofmt -w worker/ bench/
+
+clean:
+	rm -rf core-rs/target worker/bin api/__pycache__ api/.pytest_cache api/app/__pycache__ api/tests/__pycache__
+	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+
+logs:
+	docker compose logs -f
 
 run:
 	@if [ ! -f .env ]; then cp .env.example .env; fi

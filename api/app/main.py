@@ -10,7 +10,6 @@ REDIS_HOST = os.getenv("REDIS_HOST", "localhost")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
 REDIS_URL = f"redis://{REDIS_HOST}:{REDIS_PORT}"
 
-# Strict Auth Enforcement: Must be provided via environment, zero hardcoded fallback
 AUTH_TOKEN = os.environ.get("NEXUS_AUTH_TOKEN")
 if not AUTH_TOKEN:
     raise RuntimeError("CRITICAL CONFIGURATION ERROR: NEXUS_AUTH_TOKEN must be set in environment")
@@ -28,25 +27,23 @@ async def lifespan(app: FastAPI):
     )
     yield
     if redis_client:
-        await redis_client.close()
+        await redis_client.aclose()
 
 app = FastAPI(title="Nexus Ingestion Gateway", version="1.0.0", lifespan=lifespan)
 
 @app.get("/health")
 async def health_check():
-    """Liveness probe: verifies the HTTP server process is running."""
     return {"status": "alive", "service": "api-gateway"}
 
 @app.get("/ready")
 async def readiness_check():
-    """Readiness probe: validates backend infrastructure (Redis) is operational."""
     if not redis_client:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Redis client not initialized")
     try:
         await redis_client.ping()
         return {"status": "ready", "service": "api-gateway", "redis": "connected"}
-    except Exception as e:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Redis unreachable: {str(e)}")
+    except Exception as exc:
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=f"Redis unreachable: {str(exc)}")
 
 @app.post(
     "/v1/telemetry",
@@ -64,7 +61,6 @@ async def ingest_telemetry(
     if len(parts) != 2 or parts[0].lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token scheme")
 
-    # Timing-safe comparison against timing attacks
     if not secrets.compare_digest(parts[1], AUTH_TOKEN):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Unauthorized")
 
@@ -74,7 +70,7 @@ async def ingest_telemetry(
     try:
         job_data = payload.model_dump_json()
         await redis_client.lpush("nexus:stream:jobs", job_data)
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Failed to enqueue telemetry job")
 
     return TelemetryResponse(
