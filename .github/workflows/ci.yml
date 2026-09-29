@@ -55,7 +55,7 @@ jobs:
       - name: Build Staticlib & Run Go Tests with Race Detector
         run: |
           cd core-rs && cargo build --release && cd ..
-          cd worker && CGO_ENABLED=1 go test -race -v ./...
+          CGO_ENABLED=1 go test -race -v ./worker/... ./bench/...
 
   test-python:
     name: FastAPI Gateway Verification
